@@ -3,7 +3,7 @@
  * Plugin Name: WebMaster Telegram
  * Plugin URI: https://github.com/nomidua/webmaster-telegram
  * Description: Автопостинг записей в Telegram-канал: фото, заголовок, анотация, хештеги, кнопка «Читать». Отбор популярных по просмотрам, расписание по дням недели, тест в личку, ручная отправка.
- * Version: 1.0
+ * Version: 1.1
  * Author: nomidua
  * Requires at least: 6.2
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('WMTG_VERSION', '1.0');
+define('WMTG_VERSION', '1.1');
 define('WMTG_FILE', __FILE__);
 define('WMTG_REPO', 'nomidua/webmaster-telegram');
 if (!defined('WMTG_API')) define('WMTG_API', 'https://api.telegram.org');
@@ -224,9 +224,11 @@ function wmtg_publish($post, $how) {
 		update_post_meta($post->ID, '_wmtg_msg', $r[1]);
 		delete_post_meta($post->ID, '_wmtg_fail');
 		update_option('wmtg_last_sent', time(), false);
+		delete_option('wmtg_alert');
 		wmtg_log('ok', $how . ': «' . wmtg_title($post) . '» #' . $post->ID);
 	} else {
 		if (empty($r[2])) update_post_meta($post->ID, '_wmtg_fail', (int) get_post_meta($post->ID, '_wmtg_fail', true) + 1);
+		else update_option('wmtg_alert', [time(), $r[1]], false);
 		wmtg_log('err', $how . ': «' . wmtg_title($post) . '» #' . $post->ID . ' — ' . $r[1]);
 	}
 	return $r;
@@ -333,6 +335,16 @@ register_deactivation_hook(__FILE__, function () {
 /* Список записей: колонка, ссылка в строке, массовое действие         */
 /* ------------------------------------------------------------------ */
 
+/* Ссылка на пост в канале */
+function wmtg_msg_link($id) {
+	$m  = (int) get_post_meta($id, '_wmtg_msg', true);
+	$ch = trim((string) wmtg_opt('channel'));
+	if (!$m || $ch === '') return '';
+	if ($ch[0] === '@') return 'https://t.me/' . substr($ch, 1) . '/' . $m;
+	if (strpos($ch, '-100') === 0) return 'https://t.me/c/' . substr($ch, 4) . '/' . $m;
+	return '';
+}
+
 function wmtg_icon($size = 14) {
 	return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" aria-hidden="true" style="vertical-align:middle"><path fill="currentColor" d="M21.9 4.3 18.7 19.4c-.2 1.1-.9 1.3-1.8.8l-4.9-3.6-2.4 2.3c-.3.3-.5.5-1 .5l.4-5 9.1-8.2c.4-.4-.1-.6-.6-.2L6.3 13 1.5 11.5c-1-.3-1-1 .2-1.5l18.8-7.3c.9-.3 1.6.2 1.4 1.6z"/></svg>';
 }
@@ -350,7 +362,9 @@ add_action('manage_post_posts_custom_column', function ($col, $id) {
 	if ($col !== 'wmtg') return;
 	$sent = (int) get_post_meta($id, '_wmtg_sent', true);
 	if ($sent) {
-		echo '<span style="color:#00a32a" title="' . esc_attr(wmtg_t('Отправлено ', 'Відправлено ') . wp_date('d.m.Y H:i', $sent)) . '">✓</span>';
+		$t    = esc_attr(wmtg_t('Отправлено ', 'Відправлено ') . wp_date('d.m.Y H:i', $sent));
+		$link = wmtg_msg_link($id);
+		echo $link ? '<a href="' . esc_url($link) . '" target="_blank" rel="noopener" style="color:#00a32a;text-decoration:none" title="' . $t . wmtg_t(' — открыть в канале', ' — відкрити в каналі') . '">✓</a>' : '<span style="color:#00a32a" title="' . $t . '">✓</span>';
 	} elseif ((int) get_post_meta($id, '_wmtg_fail', true) >= 3) {
 		echo '<span style="color:#d63638" title="' . esc_attr(wmtg_t('Ошибка отправки (см. журнал)', 'Помилка відправки (див. журнал)')) . '">!</span>';
 	}
@@ -359,13 +373,14 @@ add_action('manage_post_posts_custom_column', function ($col, $id) {
 add_action('admin_head-edit.php', function () {
 	if ((get_current_screen()->post_type ?? '') !== 'post') return;
 	echo '<style>.wp-list-table .column-wmtg{width:26px;text-align:center;padding-left:0;padding-right:0}.wp-list-table th.column-wmtg{color:#2271b1}</style>';
-	echo '<script>document.addEventListener("click",function(e){var a=e.target.closest("a.wmtg-send");if(a&&!confirm(' . wp_json_encode(wmtg_t('Отправить запись в Telegram-канал сейчас?', 'Відправити запис у Telegram-канал зараз?')) . '))e.preventDefault();});document.addEventListener("submit",function(e){var f=e.target;if(f.id!=="posts-filter")return;var s=f.querySelector("select[name=action]"),s2=f.querySelector("select[name=action2]");if((s&&s.value==="wmtg_send")||(s2&&s2.value==="wmtg_send")){if(!confirm(' . wp_json_encode(wmtg_t('Отправить выбранные записи в Telegram сейчас?', 'Відправити вибрані записи в Telegram зараз?')) . '))e.preventDefault();}});</script>';
+	echo '<script>document.addEventListener("click",function(e){var a=e.target.closest("a.wmtg-send");if(a&&!confirm(a.dataset.sent?' . wp_json_encode(wmtg_t('Уже отправлено ', 'Вже відправлено ')) . '+a.dataset.sent+' . wp_json_encode(wmtg_t('. Отправить повторно?', '. Відправити повторно?')) . ':' . wp_json_encode(wmtg_t('Отправить запись в Telegram-канал сейчас?', 'Відправити запис у Telegram-канал зараз?')) . '))e.preventDefault();});document.addEventListener("submit",function(e){var f=e.target;if(f.id!=="posts-filter")return;var s=f.querySelector("select[name=action]"),s2=f.querySelector("select[name=action2]");if((s&&s.value==="wmtg_send")||(s2&&s2.value==="wmtg_send")){if(!confirm(' . wp_json_encode(wmtg_t('Отправить выбранные записи в Telegram сейчас?', 'Відправити вибрані записи в Telegram зараз?')) . '))e.preventDefault();}});</script>';
 });
 
 add_filter('post_row_actions', function ($actions, $post) {
 	if ($post->post_type !== 'post' || $post->post_status !== 'publish' || !current_user_can('publish_posts') || !wmtg_opt('token') || !wmtg_opt('channel')) return $actions;
-	$url = wp_nonce_url(admin_url('admin-post.php?action=wmtg_send&post=' . $post->ID), 'wmtg_send_' . $post->ID);
-	$actions['wmtg'] = '<a class="wmtg-send" href="' . esc_url($url) . '">' . esc_html(wmtg_t('В Telegram', 'В Telegram')) . '</a>';
+	$sent = (int) get_post_meta($post->ID, '_wmtg_sent', true);
+	$url  = wp_nonce_url(admin_url('admin-post.php?action=wmtg_send&post=' . $post->ID . ($sent ? '&again=1' : '')), 'wmtg_send_' . $post->ID);
+	$actions['wmtg'] = '<a class="wmtg-send" href="' . esc_url($url) . '"' . ($sent ? ' data-sent="' . esc_attr(wp_date('d.m.Y H:i', $sent)) . '"' : '') . '>' . esc_html($sent ? wmtg_t('В Telegram ещё раз', 'В Telegram ще раз') : wmtg_t('В Telegram', 'В Telegram')) . '</a>';
 	return $actions;
 }, 10, 2);
 
@@ -373,7 +388,9 @@ add_action('admin_post_wmtg_send', function () {
 	$id = (int) ($_GET['post'] ?? 0);
 	if (!$id || !current_user_can('publish_posts') || !wp_verify_nonce($_GET['_wpnonce'] ?? '', 'wmtg_send_' . $id)) wp_die('403');
 	$p = get_post($id);
-	$r = ($p && $p->post_status === 'publish') ? wmtg_publish($p, wmtg_t('Вручную', 'Вручну')) : [false, 'not published'];
+	if (!$p || $p->post_status !== 'publish') $r = [false, 'not published'];
+	elseif (get_post_meta($id, '_wmtg_sent', true) && empty($_GET['again'])) $r = [false, wmtg_t('уже отправлено', 'вже відправлено')];
+	else $r = wmtg_publish($p, wmtg_t('Вручную', 'Вручну'));
 	wp_safe_redirect(add_query_arg(['wmtg_done' => $r[0] ? 1 : 0, 'wmtg_err' => $r[0] ? false : rawurlencode($r[1])], wp_get_referer() ?: admin_url('edit.php')));
 	exit;
 });
@@ -385,15 +402,16 @@ add_filter('bulk_actions-edit-post', function ($a) {
 
 add_filter('handle_bulk_actions-edit-post', function ($to, $action, $ids) {
 	if ($action !== 'wmtg_send' || !current_user_can('publish_posts')) return $to;
-	$ok = 0; $bad = 0;
+	$ok = 0; $bad = 0; $skip = 0;
 	foreach (array_slice((array) $ids, 0, 10) as $id) {
 		$p = get_post($id);
 		if (!$p || $p->post_status !== 'publish') { $bad++; continue; }
+		if (get_post_meta($id, '_wmtg_sent', true)) { $skip++; continue; }
 		$r = wmtg_publish($p, wmtg_t('Вручную', 'Вручну'));
 		$r[0] ? $ok++ : $bad++;
 		if (count($ids) > 1) sleep(1);
 	}
-	return add_query_arg(['wmtg_bulk_ok' => $ok, 'wmtg_bulk_bad' => $bad], $to);
+	return add_query_arg(['wmtg_bulk_ok' => $ok, 'wmtg_bulk_bad' => $bad, 'wmtg_bulk_skip' => $skip], $to);
 }, 10, 3);
 
 add_action('admin_notices', function () {
@@ -402,8 +420,19 @@ add_action('admin_notices', function () {
 		else echo '<div class="notice notice-error is-dismissible"><p>' . esc_html(wmtg_t('Не отправлено: ', 'Не відправлено: ') . sanitize_text_field(wp_unslash(rawurldecode($_GET['wmtg_err'] ?? '')))) . '</p></div>';
 	}
 	if (isset($_GET['wmtg_bulk_ok'])) {
-		echo '<div class="notice notice-info is-dismissible"><p>' . esc_html(sprintf(wmtg_t('Telegram: отправлено %d, не отправлено %d (подробности в журнале плагина).', 'Telegram: відправлено %d, не відправлено %d (подробиці в журналі плагіна).'), (int) $_GET['wmtg_bulk_ok'], (int) $_GET['wmtg_bulk_bad'])) . '</p></div>';
+		echo '<div class="notice notice-info is-dismissible"><p>' . esc_html(sprintf(wmtg_t('Telegram: отправлено %d, не отправлено %d, пропущено уже отправленных %d (подробности в журнале плагина).', 'Telegram: відправлено %d, не відправлено %d, пропущено вже відправлених %d (подробиці в журналі плагіна).'), (int) $_GET['wmtg_bulk_ok'], (int) $_GET['wmtg_bulk_bad'], (int) ($_GET['wmtg_bulk_skip'] ?? 0))) . '</p></div>';
 	}
+	// F: предупреждения, если автопостинг стоит
+	if (!current_user_can('manage_options') || !wmtg_opt('enabled')) return;
+	$go = ' <a href="' . esc_url(admin_url('options-general.php?page=webmaster-telegram')) . '">' . esc_html(wmtg_t('Настройки →', 'Налаштування →')) . '</a>';
+	$al = get_option('wmtg_alert');
+	if (is_array($al)) echo '<div class="notice notice-warning"><p><b>WebMaster Telegram:</b> ' . esc_html(sprintf(wmtg_t('автопостинг не может отправить пост (%s): %s. Проверьте бота и канал.', 'автопостинг не може відправити пост (%s): %s. Перевірте бота і канал.'), wp_date('d.m H:i', $al[0]), $al[1])) . $go . '</p></div>';
+	$next = wp_next_scheduled('wmtg_tick');
+	if ($next && $next < time() - 30 * MINUTE_IN_SECONDS) echo '<div class="notice notice-warning"><p><b>WebMaster Telegram:</b> ' . esc_html(sprintf(wmtg_t('крон не запускался с %s — автопостинг стоит. Проверьте WP-Cron или серверный крон.', 'крон не запускався з %s — автопостинг стоїть. Перевірте WP-Cron або серверний крон.'), wp_date('d.m H:i', $next))) . $go . '</p></div>';
+});
+
+add_filter('removable_query_args', function ($a) {
+	return array_merge($a, ['wmtg_done', 'wmtg_err', 'wmtg_bulk_ok', 'wmtg_bulk_bad', 'wmtg_bulk_skip']);
 });
 
 /* ------------------------------------------------------------------ */
@@ -476,7 +505,7 @@ function wmtg_settings_page() {
 				if (empty($cm['ok'])) $msg = ['error', '@' . $bot['username'] . ' — ' . wmtg_t('канал не найден или бот не добавлен: ', 'канал не знайдено або бота не додано: ') . ($cm['description'] ?? '')];
 				elseif (($cm['result']['status'] ?? '') !== 'administrator') $msg = ['error', '@' . $bot['username'] . ' — ' . wmtg_t('бот не администратор канала.', 'бот не адміністратор каналу.')];
 				elseif (empty($cm['result']['can_post_messages'])) $msg = ['error', '@' . $bot['username'] . ' — ' . wmtg_t('нет права «Публиковать сообщения».', 'немає права «Публікувати повідомлення».')];
-				else $msg = ['success', '@' . $bot['username'] . ' — ' . wmtg_t('подключение в порядке: бот администратор канала и может публиковать.', 'підключення в порядку: бот адміністратор каналу і може публікувати.')];
+				else { delete_option('wmtg_alert'); $msg = ['success', '@' . $bot['username'] . ' — ' . wmtg_t('подключение в порядке: бот администратор канала и может публиковать.', 'підключення в порядку: бот адміністратор каналу і може публікувати.')]; }
 			}
 		} elseif ($do === 'find_me') {
 			$u = wmtg_api('getUpdates', ['limit' => 50, 'allowed_updates' => ['message']]);
@@ -503,6 +532,24 @@ function wmtg_settings_page() {
 				$r = wmtg_send_post($p, wmtg_opt('test_chat'));
 				$msg = $r[0] ? ['success', wmtg_t('Тест отправлен вам в личку.', 'Тест надіслано вам в особисті.')] : ['error', wmtg_t('Ошибка: ', 'Помилка: ') . $r[1]];
 				wmtg_log($r[0] ? 'info' : 'err', 'Тест: «' . wmtg_title($p) . '» #' . $p->ID . ($r[0] ? '' : ' — ' . $r[1]));
+			}
+		} elseif (preg_match('/^send:(\d+)$/', $do, $mm)) {
+			$p = get_post((int) $mm[1]);
+			if (!$p || $p->post_status !== 'publish' || get_post_meta($p->ID, '_wmtg_sent', true)) $msg = ['error', wmtg_t('Запись не опубликована или уже отправлена.', 'Запис не опублікований або вже відправлений.')];
+			else { $r = wmtg_publish($p, wmtg_t('Вручную', 'Вручну')); $msg = $r[0] ? ['success', wmtg_t('Отправлено в канал: ', 'Відправлено в канал: ') . wmtg_title($p)] : ['error', wmtg_t('Ошибка: ', 'Помилка: ') . $r[1]]; }
+		} elseif ($do === 'import') {
+			$f = $_FILES['wmtg_import']['tmp_name'] ?? '';
+			$j = ($f && is_uploaded_file($f)) ? json_decode((string) file_get_contents($f), true) : null;
+			if (!is_array($j) || ($j['plugin'] ?? '') !== 'webmaster-telegram' || !is_array($j['settings'] ?? null)) {
+				$msg = ['error', wmtg_t('Это не файл настроек WebMaster Telegram.', 'Це не файл налаштувань WebMaster Telegram.')];
+			} else {
+				$o = wmtg_opt();
+				$in = array_merge($o, array_diff_key($j['settings'], array_flip(['token', 'channel', 'test_chat', 'test_name', 'enabled'])));
+				$in['token'] = '';
+				$in['excl_cats'] = []; $miss = [];
+				foreach ((array) ($j['settings']['excl_cats'] ?? []) as $slug) { $c = get_category_by_slug($slug); $c ? $in['excl_cats'][] = $c->term_id : $miss[] = $slug; }
+				wmtg_settings_save($in);
+				$msg = ['success', wmtg_t('Настройки импортированы. Токен, канал и галочка «Автопостинг» не изменены.', 'Налаштування імпортовано. Токен, канал і галочку «Автопостинг» не змінено.') . ($miss ? ' ' . wmtg_t('Не найдены рубрики: ', 'Не знайдено рубрик: ') . implode(', ', $miss) : '')];
 			}
 		} elseif ($do === 'clear_log') {
 			update_option('wmtg_log', [], false);
@@ -561,7 +608,7 @@ function wmtg_settings_page() {
 	.wmtg-cand td,.wmtg-cand th{padding:6px 8px}
 	@media(max-width:1100px){.wmtg-cols>.wmtg-side{position:static;flex-basis:100%}}
 	</style>
-	<form method="post">
+	<form method="post" enctype="multipart/form-data">
 	<?php wp_nonce_field('wmtg_settings'); ?>
 	<div class="wmtg-cols"><div class="wmtg-main">
 
@@ -625,6 +672,10 @@ function wmtg_settings_page() {
 	<p><?php echo esc_html(wmtg_t('1) Откройте своего бота в Telegram и нажмите Start. 2) «Найти мой чат». 3) «Отправить тест мне» — придёт ровно такой пост, как в канал.', '1) Відкрийте свого бота в Telegram і натисніть Start. 2) «Знайти мій чат». 3) «Надіслати тест мені» — прийде точно такий пост, як у канал.')); ?></p>
 	<p><?php echo $btn('find_me', wmtg_t('Найти мой чат', 'Знайти мій чат')); ?> <?php echo $btn('test', wmtg_t('Отправить тест мне', 'Надіслати тест мені'), 'button button-secondary'); ?></p>
 	<p class="description"><?php echo $o['test_chat'] ? esc_html(wmtg_t('Тестовый чат: ', 'Тестовий чат: ') . $o['test_name'] . ' (' . $o['test_chat'] . ')') : esc_html(wmtg_t('Тестовый чат не найден.', 'Тестовий чат не знайдено.')); ?></p>
+	<h2><?php echo esc_html(wmtg_t('Перенос настроек', 'Перенесення налаштувань')); ?></h2>
+	<p><a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=wmtg_export'), 'wmtg_export')); ?>"><?php echo esc_html(wmtg_t('Экспорт в файл', 'Експорт у файл')); ?></a></p>
+	<p><input type="file" name="wmtg_import" accept=".json,application/json"> <?php echo $btn('import', wmtg_t('Импорт', 'Імпорт')); ?></p>
+	<p class="description"><?php echo esc_html(wmtg_t('Без токена, канала и тестового чата. Рубрики переносятся по слагу.', 'Без токена, каналу й тестового чату. Рубрики переносяться за слагом.')); ?></p>
 	</div></div>
 
 	<h2><?php echo esc_html(wmtg_t('Сейчас', 'Зараз')); ?></h2>
@@ -637,9 +688,9 @@ function wmtg_settings_page() {
 	echo '</p>';
 	$cands = array_slice(wmtg_candidates(), 0, 8);
 	if ($cands) {
-		echo '<table class="widefat striped wmtg-cand" style="max-width:900px"><thead><tr><th>#</th><th>' . esc_html(wmtg_t('Кандидат', 'Кандидат')) . '</th><th>' . esc_html(wmtg_t('Опубликовано', 'Опубліковано')) . '</th><th>' . esc_html(wmtg_t('Просм.', 'Перегл.')) . '</th><th>' . esc_html(wmtg_t('В час', 'За год')) . '</th><th></th></tr></thead><tbody>';
+		echo '<table class="widefat striped wmtg-cand" style="max-width:900px"><thead><tr><th>#</th><th>' . esc_html(wmtg_t('Кандидат', 'Кандидат')) . '</th><th>' . esc_html(wmtg_t('Опубликовано', 'Опубліковано')) . '</th><th>' . esc_html(wmtg_t('Просм.', 'Перегл.')) . '</th><th>' . esc_html(wmtg_t('В час', 'За год')) . '</th><th></th><th></th></tr></thead><tbody>';
 		foreach ($cands as $i => $c) {
-			echo '<tr><td>' . ($i + 1) . '</td><td>' . esc_html(wmtg_title($c['post'])) . '</td><td>' . esc_html(wp_date('d.m H:i', $c['pub'])) . '</td><td>' . (int) $c['views'] . '</td><td>' . esc_html($c['vph']) . '</td><td>' . ($c['ready'] ? '' : '<span class="description">' . esc_html(wmtg_t('ждёт', 'чекає')) . '</span>') . '</td></tr>';
+			echo '<tr><td>' . ($i + 1) . '</td><td>' . esc_html(wmtg_title($c['post'])) . '</td><td>' . esc_html(wp_date('d.m H:i', $c['pub'])) . '</td><td>' . (int) $c['views'] . '</td><td>' . esc_html($c['vph']) . '</td><td>' . ($c['ready'] ? '' : '<span class="description">' . esc_html(wmtg_t('ждёт', 'чекає')) . '</span>') . '</td><td style="text-align:right"><button type="submit" name="wmtg_do" value="send:' . (int) $c['post']->ID . '" class="button button-small" onclick="return confirm(' . esc_attr(wp_json_encode(wmtg_t('Отправить эту запись в канал сейчас?', 'Відправити цей запис у канал зараз?'))) . ')">' . esc_html(wmtg_t('Отправить сейчас', 'Відправити зараз')) . '</button></td></tr>';
 		}
 		echo '</tbody></table>';
 	} else {
@@ -675,6 +726,17 @@ function wmtg_settings_page() {
 	</script>
 	<?php }
 }
+
+add_action('admin_post_wmtg_export', function () {
+	if (!current_user_can('manage_options') || !wp_verify_nonce($_GET['_wpnonce'] ?? '', 'wmtg_export')) wp_die('403');
+	$o = array_diff_key(wmtg_opt(), array_flip(['token', 'channel', 'test_chat', 'test_name', 'enabled']));
+	$o['excl_cats'] = array_values(array_filter(array_map(function ($id) { $c = get_category((int) $id); return $c && !is_wp_error($c) ? $c->slug : ''; }, (array) $o['excl_cats'])));
+	nocache_headers();
+	header('Content-Type: application/json; charset=utf-8');
+	header('Content-Disposition: attachment; filename="webmaster-telegram-' . sanitize_file_name(wp_parse_url(home_url(), PHP_URL_HOST)) . '.json"');
+	echo wp_json_encode(['plugin' => 'webmaster-telegram', 'version' => WMTG_VERSION, 'settings' => $o], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+	exit;
+});
 
 /* ------------------------------------------------------------------ */
 /* Обновления с GitHub (публичный репозиторий, Releases)              */
