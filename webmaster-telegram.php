@@ -2,8 +2,9 @@
 /**
  * Plugin Name: WebMaster Telegram
  * Plugin URI: https://github.com/nomidua/webmaster-telegram
+ * Update URI: https://github.com/nomidua/webmaster-telegram
  * Description: Автопостинг записей в Telegram-канал: фото, заголовок, анотация, хештеги, кнопка «Читать». Отбор популярных по просмотрам, расписание по дням недели, тест в личку, ручная отправка.
- * Version: 1.1
+ * Version: 1.2
  * Author: nomidua
  * Requires at least: 6.2
  * Requires PHP: 7.4
@@ -13,7 +14,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('WMTG_VERSION', '1.1');
+define('WMTG_VERSION', '1.2');
 define('WMTG_FILE', __FILE__);
 define('WMTG_REPO', 'nomidua/webmaster-telegram');
 if (!defined('WMTG_API')) define('WMTG_API', 'https://api.telegram.org');
@@ -41,6 +42,7 @@ function wmtg_defaults() {
 		'utm_str'      => 'utm_source=telegram&utm_medium=social&utm_campaign=channel',
 		'mode'         => 'popular',
 		'wait'         => 60,
+		'views_src'    => 'auto',
 		'views_key'    => 'post_views_count',
 		'excl_cats'    => [],
 		'interval'     => 40,
@@ -238,9 +240,44 @@ function wmtg_publish($post, $how) {
 /* Отбор и расписание                                                  */
 /* ------------------------------------------------------------------ */
 
+/* Таблица формата WordPress Popular Posts (её же ведёт Sphere Post Views): [есть, свежая] */
+function wmtg_wpp_table() {
+	static $c = null;
+	if ($c !== null) return $c;
+	$c = get_transient('wmtg_wpp');
+	if (!is_array($c)) {
+		global $wpdb;
+		$tb = $wpdb->prefix . 'popularpostsdata';
+		$c  = [false, false];
+		if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $tb)) === $tb) {
+			$e    = $wpdb->suppress_errors(true);
+			$last = $wpdb->get_var("SELECT MAX(last_viewed) FROM `$tb` WHERE postid > 0 AND pageviews > 0");
+			$err  = $wpdb->last_error;
+			$wpdb->suppress_errors($e);
+			if (!$err) $c = [true, $last && strtotime($last) > time() - 3 * DAY_IN_SECONDS];
+		}
+		set_transient('wmtg_wpp', $c, DAY_IN_SECONDS);
+	}
+	return $c;
+}
+
+/* Источник просмотров: pvc, wpp, meta или none */
+function wmtg_views_src() {
+	$s = wmtg_opt('views_src');
+	if ($s === 'meta') return 'meta';
+	[$has, $fresh] = wmtg_wpp_table();
+	if ($s === 'wpp') return $has ? 'wpp' : 'none';
+	if (function_exists('pvc_get_post_views')) return 'pvc';
+	return $has && $fresh ? 'wpp' : 'meta';
+}
+
 function wmtg_views($id) {
-	if (function_exists('pvc_get_post_views')) return (int) pvc_get_post_views($id);
-	return (int) get_post_meta($id, (string) wmtg_opt('views_key'), true);
+	switch (wmtg_views_src()) {
+		case 'pvc': return (int) pvc_get_post_views($id);
+		case 'wpp': global $wpdb; return (int) $wpdb->get_var($wpdb->prepare("SELECT pageviews FROM `{$wpdb->prefix}popularpostsdata` WHERE postid = %d", $id));
+		case 'meta': return (int) get_post_meta($id, (string) wmtg_opt('views_key'), true);
+	}
+	return 0;
 }
 
 /* Кандидаты: опубликованы вчера/сегодня (время сайта), не отправлены, после установки плагина */
@@ -476,6 +513,7 @@ function wmtg_settings_save($in) {
 		'utm_str'      => preg_replace('/[^A-Za-z0-9_\-=&.%]/', '', (string) ($in['utm_str'] ?? '')),
 		'mode'         => ($in['mode'] ?? '') === 'all' ? 'all' : 'popular',
 		'wait'         => max(0, min(720, (int) ($in['wait'] ?? 60))),
+		'views_src'    => in_array($in['views_src'] ?? '', ['auto', 'meta', 'wpp'], true) ? $in['views_src'] : 'auto',
 		'views_key'    => sanitize_key($in['views_key'] ?? 'post_views_count') ?: 'post_views_count',
 		'excl_cats'    => array_map('intval', (array) ($in['excl_cats'] ?? [])),
 		'interval'     => max(5, min(1440, (int) ($in['interval'] ?? 40))),
@@ -637,8 +675,10 @@ function wmtg_settings_page() {
 	<?php
 	$row(wmtg_t('Режим', 'Режим'), '<label><input type="radio" name="mode" value="popular"' . checked($o['mode'], 'popular', false) . '> ' . esc_html(wmtg_t('Только популярные', 'Тільки популярні')) . '</label><br><label><input type="radio" name="mode" value="all"' . checked($o['mode'], 'all', false) . '> ' . esc_html(wmtg_t('Все по очереди', 'Усі по черзі')) . '</label>', esc_html(wmtg_t('Популярные: из записей за вчера и сегодня в каждый слот уходит та, у которой больше просмотров в час. «Все»: по порядку публикации, записи старше 24 ч пропускаются.', 'Популярні: із записів за вчора й сьогодні в кожен слот іде та, у якої більше переглядів за годину. «Усі»: за порядком публікації, записи старші за 24 год пропускаються.')));
 	$row(wmtg_t('Ждать после публикации', 'Чекати після публікації'), '<input type="number" min="0" max="720" class="small-text" name="wait" value="' . (int) $o['wait'] . '"> ' . esc_html(wmtg_t('мин', 'хв')), esc_html(wmtg_t('Чтобы у свежей записи успели накопиться просмотры.', 'Щоб у свіжого запису встигли накопичитися перегляди.')));
-	$src = function_exists('pvc_get_post_views') ? 'Post Views Counter' : wmtg_t('поле записи', 'поле запису');
-	$row(wmtg_t('Просмотры', 'Перегляди'), '<input type="text" class="regular-text code" style="width:200px" name="views_key" value="' . esc_attr($o['views_key']) . '"> <span class="description">' . esc_html(wmtg_t('сейчас: ', 'зараз: ') . $src) . '</span>', esc_html(wmtg_t('Если установлен Post Views Counter — берётся он. Иначе — это поле записи (у темы Newspaper: post_views_count).', 'Якщо встановлено Post Views Counter — береться він. Інакше — це поле запису (у теми Newspaper: post_views_count).')));
+	$srcs = ['pvc' => 'Post Views Counter', 'wpp' => 'WP Popular Posts / Sphere Post Views', 'meta' => wmtg_t('поле записи ', 'поле запису ') . $o['views_key'], 'none' => wmtg_t('не найдено', 'не знайдено')];
+	$vs   = '';
+	foreach (['auto' => wmtg_t('Авто', 'Авто'), 'wpp' => 'WP Popular Posts / Sphere', 'meta' => wmtg_t('Поле записи', 'Поле запису')] as $k => $v) $vs .= '<option value="' . $k . '"' . selected($o['views_src'], $k, false) . '>' . esc_html($v) . '</option>';
+	$row(wmtg_t('Просмотры', 'Перегляди'), '<select name="views_src">' . $vs . '</select> ' . esc_html(wmtg_t('поле:', 'поле:')) . ' <input type="text" class="regular-text code" style="width:180px" name="views_key" value="' . esc_attr($o['views_key']) . '"><br><span class="description"><b>' . esc_html(wmtg_t('Сейчас: ', 'Зараз: ')) . '</b>' . esc_html($srcs[wmtg_views_src()]) . '</span>', esc_html(wmtg_t('Авто: Post Views Counter → таблица WP Popular Posts / Sphere Post Views (если в ней есть свежие просмотры) → поле записи (у темы Newspaper: post_views_count).', 'Авто: Post Views Counter → таблиця WP Popular Posts / Sphere Post Views (якщо в ній є свіжі перегляди) → поле запису (у теми Newspaper: post_views_count).')));
 	$cl = '';
 	foreach (get_categories(['hide_empty' => false]) as $c) $cl .= '<label style="display:inline-block;min-width:150px;margin:0 12px 6px 0"><input type="checkbox" name="excl_cats[]" value="' . (int) $c->term_id . '"' . (in_array((int) $c->term_id, array_map('intval', (array) $o['excl_cats']), true) ? ' checked' : '') . '> ' . esc_html($c->name) . '</label>';
 	$row(wmtg_t('Не отправлять из рубрик', 'Не відправляти з рубрик'), $cl);
@@ -765,8 +805,9 @@ add_filter('pre_set_site_transient_update_plugins', function ($t) {
 	$base = plugin_basename(WMTG_FILE);
 	if ($r && version_compare($r['version'], WMTG_VERSION, '>')) {
 		$t->response[$base] = (object) ['slug' => 'webmaster-telegram', 'plugin' => $base, 'new_version' => $r['version'], 'package' => $r['zip'], 'url' => $r['url']];
-	} elseif (isset($t->response[$base])) {
+	} else {
 		unset($t->response[$base]);
+		$t->no_update[$base] = (object) ['slug' => 'webmaster-telegram', 'plugin' => $base, 'new_version' => WMTG_VERSION, 'package' => '', 'url' => 'https://github.com/' . WMTG_REPO];
 	}
 	return $t;
 });
