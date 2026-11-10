@@ -4,7 +4,7 @@
  * Plugin URI: https://github.com/nomidua/webmaster-telegram
  * Update URI: https://github.com/nomidua/webmaster-telegram
  * Description: Автопостинг записей в Telegram-канал: фото, заголовок, анотация, хештеги, кнопка «Читать». Отбор популярных по просмотрам, расписание по дням недели, тест в личку, ручная отправка.
- * Version: 1.2
+ * Version: 1.3
  * Author: nomidua
  * Requires at least: 6.2
  * Requires PHP: 7.4
@@ -14,7 +14,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('WMTG_VERSION', '1.2');
+define('WMTG_VERSION', '1.3');
 define('WMTG_FILE', __FILE__);
 define('WMTG_REPO', 'nomidua/webmaster-telegram');
 if (!defined('WMTG_API')) define('WMTG_API', 'https://api.telegram.org');
@@ -35,6 +35,7 @@ function wmtg_defaults() {
 		'default_lang' => strpos((string) get_locale(), 'uk') === 0 ? 'uk' : 'ru',
 		'excerpt_len'  => 200,
 		'hashtags'     => 2,
+		'link'         => 'button',
 		'btn_ru'       => 'Читать',
 		'btn_uk'       => 'Читати',
 		'silent'       => 1,
@@ -136,7 +137,9 @@ function wmtg_message($post) {
 	$ex    = wmtg_excerpt($post);
 	$tags  = wmtg_hashtags($post->ID);
 	$tail  = $tags ? "\n\n" . implode(' ', $tags) : '';
-	$head  = '<b>' . $e($title) . '</b>';
+	$url   = wmtg_url($post->ID);
+	$link  = wmtg_opt('link');
+	$head  = $link === 'button' ? '<b>' . $e($title) . '</b>' : '<b><a href="' . htmlspecialchars($url, ENT_QUOTES, 'UTF-8') . '">' . $e($title) . '</a></b>';
 	$room  = 1000 - mb_strlen($title) - mb_strlen($tail) - 10;
 	if (mb_strlen($ex) > $room) $ex = wmtg_cut($ex, max(0, $room));
 	$caption = $head . ($ex !== '' ? "\n\n" . $e($ex) : '') . $e($tail);
@@ -148,7 +151,8 @@ function wmtg_message($post) {
 		'excerpt' => $ex,
 		'tags'    => $tags,
 		'button'  => $btn !== '' ? $btn : 'Читать',
-		'url'     => wmtg_url($post->ID),
+		'url'     => $url,
+		'btn_on'  => $link !== 'title',
 		'thumb'   => (int) get_post_thumbnail_id($post->ID),
 	];
 }
@@ -200,13 +204,13 @@ function wmtg_photo($thumb_id) {
 /* Отправка записи в чат (канал или тестовый). Возвращает [ok, message_id|error] */
 function wmtg_send_post($post, $chat) {
 	$m      = wmtg_message($post);
-	$markup = ['inline_keyboard' => [[['text' => $m['button'], 'url' => $m['url']]]]];
+	$markup = $m['btn_on'] ? ['inline_keyboard' => [[['text' => $m['button'], 'url' => $m['url']]]]] : null;
 	$silent = wmtg_opt('silent') ? true : false;
 	$photo  = wmtg_photo($m['thumb']);
 	if ($photo) {
-		$r = wmtg_api('sendPhoto', ['chat_id' => $chat, 'caption' => $m['caption'], 'parse_mode' => 'HTML', 'disable_notification' => $silent ? 'true' : 'false', 'reply_markup' => $markup], $photo);
+		$r = wmtg_api('sendPhoto', ['chat_id' => $chat, 'caption' => $m['caption'], 'parse_mode' => 'HTML', 'disable_notification' => $silent ? 'true' : 'false'] + ($markup ? ['reply_markup' => $markup] : []), $photo);
 	} else {
-		$r = wmtg_api('sendMessage', ['chat_id' => $chat, 'text' => $m['caption'], 'parse_mode' => 'HTML', 'disable_notification' => $silent, 'link_preview_options' => ['is_disabled' => true], 'reply_markup' => $markup]);
+		$r = wmtg_api('sendMessage', ['chat_id' => $chat, 'text' => $m['caption'], 'parse_mode' => 'HTML', 'disable_notification' => $silent, 'link_preview_options' => ['is_disabled' => true]] + ($markup ? ['reply_markup' => $markup] : []));
 	}
 	if (!empty($r['ok'])) return [true, (int) ($r['result']['message_id'] ?? 0)];
 	// Общая ошибка (сеть, токен, права, канал, лимиты) — не вина записи: ставим паузу, запись не помечаем
@@ -506,6 +510,7 @@ function wmtg_settings_save($in) {
 		'default_lang' => ($in['default_lang'] ?? '') === 'uk' ? 'uk' : 'ru',
 		'excerpt_len'  => max(50, min(800, (int) ($in['excerpt_len'] ?? 200))),
 		'hashtags'     => max(0, min(5, (int) ($in['hashtags'] ?? 2))),
+		'link'         => in_array($in['link'] ?? '', ['button', 'title', 'both'], true) ? $in['link'] : 'button',
 		'btn_ru'       => sanitize_text_field($in['btn_ru'] ?? 'Читать'),
 		'btn_uk'       => sanitize_text_field($in['btn_uk'] ?? 'Читати'),
 		'silent'       => empty($in['silent']) ? 0 : 1,
@@ -664,6 +669,9 @@ function wmtg_settings_page() {
 	<?php
 	$row(wmtg_t('Текст', 'Текст'), '<input type="number" min="50" max="800" class="small-text" name="excerpt_len" value="' . (int) $o['excerpt_len'] . '"> ' . esc_html(wmtg_t('знаков, если нет анотации', 'знаків, якщо немає анотації')), esc_html(wmtg_t('Порядок: жирный заголовок → пустая строка → анотация (отрывок) или начало текста.', 'Порядок: жирний заголовок → порожній рядок → анотація (уривок) або початок тексту.')));
 	$row(wmtg_t('Хештеги', 'Хештеги'), '<input type="number" min="0" max="5" class="small-text" name="hashtags" value="' . (int) $o['hashtags'] . '"> ' . esc_html(wmtg_t('из меток (0 — без хештегов)', 'з міток (0 — без хештегів)')), esc_html(wmtg_t('Метка из нескольких слов склеивается: «Белый дом» → #БелыйДом.', 'Мітка з кількох слів склеюється: «Білий дім» → #БілийДім.')));
+	$lk = '';
+	foreach (['button' => wmtg_t('Кнопка', 'Кнопка'), 'title' => wmtg_t('Заголовок', 'Заголовок'), 'both' => wmtg_t('Кнопка и заголовок', 'Кнопка і заголовок')] as $k => $v) $lk .= '<label style="margin-right:16px"><input type="radio" name="link" value="' . $k . '"' . checked($o['link'], $k, false) . '> ' . esc_html($v) . '</label>';
+	$row(wmtg_t('Ссылка на статью', 'Посилання на статтю'), $lk, esc_html(wmtg_t('Где будет ссылка: в кнопке под постом, в заголовке или в обоих.', 'Де буде посилання: у кнопці під постом, у заголовку або в обох.')));
 	$row(wmtg_t('Кнопка', 'Кнопка'), 'ru <input type="text" class="regular-text" style="width:140px" name="btn_ru" value="' . esc_attr($o['btn_ru']) . '"> &nbsp; uk <input type="text" class="regular-text" style="width:140px" name="btn_uk" value="' . esc_attr($o['btn_uk']) . '"> &nbsp; ' . esc_html(wmtg_t('по умолчанию', 'за замовчуванням')) . ' <select name="default_lang"><option value="ru"' . selected($o['default_lang'], 'ru', false) . '>ru</option><option value="uk"' . selected($o['default_lang'], 'uk', false) . '>uk</option></select>', esc_html(wmtg_t('Язык — по полю post_lang записи, иначе «по умолчанию».', 'Мова — за полем post_lang запису, інакше «за замовчуванням».')));
 	$row(wmtg_t('Без звука', 'Без звуку'), '<label><input type="checkbox" name="silent" value="1"' . checked($o['silent'], 1, false) . '> ' . esc_html(wmtg_t('Подписчики получают уведомление без звука', 'Підписники отримують сповіщення без звуку')) . '</label>');
 	$row('UTM', '<label><input type="checkbox" name="utm" value="1"' . checked($o['utm'], 1, false) . '> ' . esc_html(wmtg_t('Добавлять к ссылке', 'Додавати до посилання')) . '</label><br><input type="text" class="large-text code" name="utm_str" value="' . esc_attr($o['utm_str']) . '">', esc_html(wmtg_t('Ссылка спрятана в кнопке, в тексте поста её не видно. В GA4 трафик будет виден как telegram / social.', 'Посилання сховане в кнопці, в тексті поста його не видно. У GA4 трафік буде видно як telegram / social.')));
@@ -673,7 +681,7 @@ function wmtg_settings_page() {
 	<h2><?php echo esc_html(wmtg_t('Отбор', 'Відбір')); ?></h2>
 	<table class="form-table" role="presentation">
 	<?php
-	$row(wmtg_t('Режим', 'Режим'), '<label><input type="radio" name="mode" value="popular"' . checked($o['mode'], 'popular', false) . '> ' . esc_html(wmtg_t('Только популярные', 'Тільки популярні')) . '</label><br><label><input type="radio" name="mode" value="all"' . checked($o['mode'], 'all', false) . '> ' . esc_html(wmtg_t('Все по очереди', 'Усі по черзі')) . '</label>', esc_html(wmtg_t('Популярные: из записей за вчера и сегодня в каждый слот уходит та, у которой больше просмотров в час. «Все»: по порядку публикации, записи старше 24 ч пропускаются.', 'Популярні: із записів за вчора й сьогодні в кожен слот іде та, у якої більше переглядів за годину. «Усі»: за порядком публікації, записи старші за 24 год пропускаються.')));
+	$row(wmtg_t('Режим', 'Режим'), '<label><input type="radio" name="mode" value="popular"' . checked($o['mode'], 'popular', false) . '> ' . esc_html(wmtg_t('Только популярные', 'Тільки популярні')) . '</label><br><label><input type="radio" name="mode" value="all"' . checked($o['mode'], 'all', false) . '> ' . esc_html(wmtg_t('Все по очереди', 'Усі по черзі')) . '</label>', esc_html(wmtg_t('Популярные: из записей за вчера и сегодня (по времени сайта) в каждый слот уходит та, у которой больше просмотров в час. «Все»: по порядку публикации, записи старше 24 ч пропускаются.', 'Популярні: із записів за вчора й сьогодні (за часом сайту) в кожен слот іде та, у якої більше переглядів за годину. «Усі»: за порядком публікації, записи старші за 24 год пропускаються.')));
 	$row(wmtg_t('Ждать после публикации', 'Чекати після публікації'), '<input type="number" min="0" max="720" class="small-text" name="wait" value="' . (int) $o['wait'] . '"> ' . esc_html(wmtg_t('мин', 'хв')), esc_html(wmtg_t('Чтобы у свежей записи успели накопиться просмотры.', 'Щоб у свіжого запису встигли накопичитися перегляди.')));
 	$srcs = ['pvc' => 'Post Views Counter', 'wpp' => 'WP Popular Posts / Sphere Post Views', 'meta' => wmtg_t('поле записи ', 'поле запису ') . $o['views_key'], 'none' => wmtg_t('не найдено', 'не знайдено')];
 	$vs   = '';
@@ -758,8 +766,9 @@ function wmtg_settings_page() {
 	function draw(){
 	var ex=P.excerpt||cut(P.text,Math.max(50,parseInt(v('excerpt_len'))||200)),n=Math.max(0,parseInt(v('hashtags'))||0),tags=[];
 	P.tags.forEach(function(t){var h=tag(t);if(h&&tags.length<n)tags.push(h);});
-	document.getElementById('wmtg-text').innerHTML='<b>'+esc(P.title)+'</b>'+(ex?'\n\n'+esc(ex):'')+(tags.length?'\n\n<a>'+esc(tags.join(' '))+'</a>':'');
-	var lang=P.lang||v('default_lang');document.getElementById('wmtg-kbd').textContent='↗ '+(lang==='uk'?v('btn_uk'):v('btn_ru'));
+	var lk=(f.querySelector('[name=link]:checked')||{}).value||'button';
+	document.getElementById('wmtg-text').innerHTML='<b>'+(lk==='button'?esc(P.title):'<a>'+esc(P.title)+'</a>')+'</b>'+(ex?'\n\n'+esc(ex):'')+(tags.length?'\n\n<a>'+esc(tags.join(' '))+'</a>':'');
+	var lang=P.lang||v('default_lang');var kb=document.getElementById('wmtg-kbd');kb.textContent='↗ '+(lang==='uk'?v('btn_uk'):v('btn_ru'));kb.style.display=lk==='title'?'none':'';
 	}
 	f.addEventListener('input',draw);f.addEventListener('change',draw);draw();
 	})();
